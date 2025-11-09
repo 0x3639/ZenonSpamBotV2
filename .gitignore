@@ -1,0 +1,22 @@
+# Binaries
+send-bot/send-bot
+receive-bot/receive-bot
+
+# Log files
+*.log
+
+# Environment files
+.env
+
+# Output files
+*.txt
+
+# OS files
+.DS_Store
+
+# IDE files
+.vscode/
+.idea/
+
+# Wallet data
+.znn/

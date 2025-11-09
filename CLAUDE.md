@@ -22,11 +22,13 @@ Each bot is a standalone application in its own directory with separate configur
    - Logs to `send-bot.log`
 
 2. **receive-bot/** - Transaction receiver
-   - Subscribes to unreceived transaction notifications via WebSocket
-   - Automatically receives incoming transactions until idle timeout
-   - Auto-reconnects on subscription errors
-   - Configured via `.env` file with idle timeout
-   - Logs to `receive-bot.log`
+   - Auto-receives all pending transactions on startup
+   - Subscribes to unreceived transaction notifications via WebSocket for immediate receives
+   - Subscribes to account blocks to track block publication and confirmation
+   - Subscribes to momentums to track which pillar producers confirm transactions
+   - Stops when all received transactions are confirmed or after timeout
+   - Configured via `.env` file with momentum confirmation timeout
+   - Logs to `receive-bot.log` and `momentum-tracking.log`
 
 ### Shared Code Patterns
 
@@ -53,10 +55,17 @@ Both applications share:
 4. Runs for `DURATION_SECONDS` (or indefinitely if 0)
 
 **Receive Bot:**
-1. Subscribes to unreceived transaction stream
-2. For each unreceived block notification, creates and sends receive transaction
-3. Stops after `IDLE_TIMEOUT_SECONDS` with no activity
-4. Auto-reconnects on subscription errors (infinite loop with 5s delay)
+1. Auto-receives all pending unreceived transactions on startup
+2. Subscribes to three event streams:
+   - `ToUnreceivedAccountBlocksByAddress`: Immediately notified when new transactions arrive
+   - `ToAccountBlocksByAddress`: Tracks when blocks are published and confirmed
+   - `ToMomentums`: Tracks which pillar producers include transactions in momentums
+3. For each unreceived block notification, immediately creates and sends receive transaction
+4. Monitors transaction confirmations in momentums and tracks producer statistics
+5. Stops when either:
+   - All received transactions are confirmed in momentums, OR
+   - `MOMENTUM_CONFIRMATION_TIMEOUT_SECONDS` passes since last received transaction
+6. Logs momentum tracking data including producer addresses to `momentum-tracking.log`
 
 ### Amount Handling
 
@@ -134,7 +143,7 @@ Both bots require `.env` files (copy from `.env.example`):
 **receive-bot/.env:**
 - `WALLET_NAME`, `PASSWORD`: Wallet credentials
 - `RPC_URL`: WebSocket endpoint
-- `IDLE_TIMEOUT_SECONDS`: Seconds of inactivity before stopping
+- `MOMENTUM_CONFIRMATION_TIMEOUT_SECONDS`: Maximum seconds to wait since last received transaction before stopping (default: 120)
 
 ## Dependencies
 

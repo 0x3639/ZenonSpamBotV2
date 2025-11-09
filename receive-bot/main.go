@@ -19,10 +19,9 @@ import (
 )
 
 type Config struct {
-	WalletName                        string
-	Password                          string
-	RpcURL                            string
-	PollIntervalSeconds               int
+	WalletName                         string
+	Password                           string
+	RpcURL                             string
 	MomentumConfirmationTimeoutSeconds int
 }
 
@@ -123,12 +122,6 @@ func parseConfig(env map[string]string) (*Config, error) {
 	}
 
 	// Receive configuration
-	pollInterval, err := strconv.Atoi(env["POLL_INTERVAL_SECONDS"])
-	if err != nil {
-		return nil, fmt.Errorf("invalid POLL_INTERVAL_SECONDS: %w", err)
-	}
-	config.PollIntervalSeconds = pollInterval
-
 	momentumTimeout, err := strconv.Atoi(env["MOMENTUM_CONFIRMATION_TIMEOUT_SECONDS"])
 	if err != nil {
 		return nil, fmt.Errorf("invalid MOMENTUM_CONFIRMATION_TIMEOUT_SECONDS: %w", err)
@@ -179,7 +172,8 @@ func setupWallet(walletName, password string) error {
 		fmt.Printf("Seed Phrase: %s\n", ks.Mnemonic)
 		fmt.Println("===========================================")
 		fmt.Println("IMPORTANT: Save your seed phrase securely!")
-		fmt.Println("===========================================\n")
+		fmt.Println("===========================================")
+		fmt.Println()
 
 		return nil
 	} else {
@@ -201,7 +195,8 @@ func showSeedInfo(walletName, password string) error {
 	fmt.Printf("Wallet Name: %s\n", walletName)
 	fmt.Printf("Address: %s\n", ks.BaseAddress.String())
 	fmt.Printf("Seed Phrase: %s\n", ks.Mnemonic)
-	fmt.Println("===========================================\n")
+	fmt.Println("===========================================")
+	fmt.Println()
 
 	return nil
 }
@@ -226,8 +221,77 @@ func initMomentumLogger() (*os.File, *log.Logger, error) {
 	return logFile, logger, nil
 }
 
+// autoReceivePending receives all pending unreceived transactions on startup
+func autoReceivePending(z *zenon.Zenon, logger *log.Logger) (int, error) {
+	totalReceived := 0
+
+	fmt.Println("Checking for unreceived transactions on startup...")
+
+	for {
+		unreceivedBlocks, err := z.Client.LedgerApi.GetUnreceivedBlocksByAddress(z.Address(), 0, 10)
+		if err != nil {
+			return totalReceived, fmt.Errorf("failed to get unreceived blocks: %w", err)
+		}
+
+		if len(unreceivedBlocks.List) == 0 {
+			break
+		}
+
+		for _, block := range unreceivedBlocks.List {
+			receiveTx := &nom.AccountBlock{
+				BlockType:     nom.BlockTypeUserReceive,
+				FromBlockHash: block.Hash,
+			}
+
+			if err := z.Send(receiveTx); err != nil {
+				logMsg := fmt.Sprintf("[ERROR] %s | Failed to receive pending block %s: %v",
+					time.Now().Format("2006-01-02 15:04:05"),
+					block.Hash.String(),
+					err)
+				fmt.Println(logMsg)
+				logger.Println(logMsg)
+				continue
+			}
+
+			totalReceived++
+			logMsg := fmt.Sprintf("%s | Startup RX #%d | Send Hash: %s | Received Hash: %s",
+				time.Now().Format("2006-01-02 15:04:05"),
+				totalReceived,
+				block.Hash.String(),
+				receiveTx.Hash.String())
+			fmt.Println(logMsg)
+			logger.Println(logMsg)
+		}
+	}
+
+	if totalReceived > 0 {
+		fmt.Printf("Auto-received %d pending transactions on startup\n", totalReceived)
+	} else {
+		fmt.Println("No pending transactions found on startup")
+	}
+	fmt.Println()
+
+	return totalReceived, nil
+}
+
 func runReceiveBot(config *Config, logger *log.Logger) error {
 	totalReceived := 0
+	var activityMutex sync.Mutex
+	lastActivityTime := time.Now()
+
+	// Helper function to update last activity time (thread-safe)
+	updateActivity := func() {
+		activityMutex.Lock()
+		lastActivityTime = time.Now()
+		activityMutex.Unlock()
+	}
+
+	// Helper function to get time since last activity (thread-safe)
+	getTimeSinceActivity := func() time.Duration {
+		activityMutex.Lock()
+		defer activityMutex.Unlock()
+		return time.Since(lastActivityTime)
+	}
 
 	// Initialize momentum tracker
 	tracker := newMomentumTracker()
@@ -253,9 +317,17 @@ func runReceiveBot(config *Config, logger *log.Logger) error {
 
 	fmt.Printf("Connected to %s\n", config.RpcURL)
 	fmt.Printf("Monitoring address: %s\n", z.Address().String())
-	fmt.Printf("Poll interval: %d seconds\n", config.PollIntervalSeconds)
 	fmt.Printf("Momentum confirmation timeout: %d seconds\n", config.MomentumConfirmationTimeoutSeconds)
-	fmt.Println("Starting to poll for unreceived transactions and track momentums...")
+	fmt.Println()
+
+	// Auto-receive any pending transactions on startup
+	startupReceived, err := autoReceivePending(z, logger)
+	if err != nil {
+		return fmt.Errorf("failed to auto-receive pending transactions: %w", err)
+	}
+	totalReceived += startupReceived
+
+	fmt.Println("Starting subscription-based monitoring for unreceived transactions and momentums...")
 	fmt.Println()
 
 	// Subscribe to momentums
@@ -264,6 +336,20 @@ func runReceiveBot(config *Config, logger *log.Logger) error {
 		return fmt.Errorf("failed to subscribe to momentums: %w", err)
 	}
 	defer momentumSubscription.Unsubscribe()
+
+	// Subscribe to unreceived account blocks
+	unreceivedSubscription, unreceivedCh, err := z.Client.SubscriberApi.ToUnreceivedAccountBlocksByAddress(z.Address())
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to unreceived account blocks: %w", err)
+	}
+	defer unreceivedSubscription.Unsubscribe()
+
+	// Subscribe to account blocks for this address
+	accountBlockSubscription, accountBlockCh, err := z.Client.SubscriberApi.ToAccountBlocksByAddress(z.Address())
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to account blocks: %w", err)
+	}
+	defer accountBlockSubscription.Unsubscribe()
 
 	// Write header to momentum log
 	momentumLogger.Println("=== Momentum Tracking Log ===")
@@ -320,61 +406,78 @@ func runReceiveBot(config *Config, logger *log.Logger) error {
 		}
 	}()
 
-	// Track last activity time for confirmation timeout
-	// This gets updated whenever we receive new transactions
-	lastActivityTime := time.Now()
+	// Start unreceived blocks processing goroutine
+	go func() {
+		for {
+			select {
+			case unreceivedBlocks := <-unreceivedCh:
+				for _, block := range unreceivedBlocks {
+					fmt.Printf("Unreceived block detected: %s\n", block.Hash.String())
 
-	// Start polling loop for unreceived transactions
-	for {
-		// Get all unreceived blocks (page size limited by API)
-		unreceivedBlocks, err := z.Client.LedgerApi.GetUnreceivedBlocksByAddress(z.Address(), 0, 10)
-		if err != nil {
-			errMsg := fmt.Sprintf("[ERROR] %s | Failed to get unreceived blocks: %v",
-				time.Now().Format("2006-01-02 15:04:05"),
-				err)
-			fmt.Println(errMsg)
-			logger.Println(errMsg)
-		} else if len(unreceivedBlocks.List) > 0 {
-			// Process unreceived blocks
-			for _, block := range unreceivedBlocks.List {
-				fmt.Printf("Unreceived block detected: %s\n", block.Hash.String())
+					// Create receive transaction
+					receiveTx := &nom.AccountBlock{
+						BlockType:     nom.BlockTypeUserReceive,
+						FromBlockHash: block.Hash,
+					}
 
-				// Create receive transaction
-				receiveTx := &nom.AccountBlock{
-					BlockType:     nom.BlockTypeUserReceive,
-					FromBlockHash: block.Hash,
+					// Send receive transaction
+					if err := z.Send(receiveTx); err != nil {
+						errMsg := fmt.Sprintf("[ERROR] %s | Failed to receive block %s: %v",
+							time.Now().Format("2006-01-02 15:04:05"),
+							block.Hash.String(),
+							err)
+						fmt.Println(errMsg)
+						logger.Println(errMsg)
+						continue
+					}
+
+					totalReceived++
+
+					// Track this received TX hash
+					txHash := receiveTx.Hash.String()
+					tracker.addReceivedTx(txHash)
+
+					// Log successful receive
+					logMsg := fmt.Sprintf("%s | RX #%d | Send Hash: %s | Received Hash: %s",
+						time.Now().Format("2006-01-02 15:04:05"),
+						totalReceived,
+						block.Hash.String(),
+						txHash)
+					fmt.Println(logMsg)
+					logger.Println(logMsg)
+
+					// Update last activity time since we received new transaction
+					updateActivity()
 				}
+			case <-momentumDone:
+				return
+			}
+		}
+	}()
 
-				// Send receive transaction
-				if err := z.Send(receiveTx); err != nil {
-					errMsg := fmt.Sprintf("[ERROR] %s | Failed to receive block %s: %v",
+	// Start account block processing goroutine (to track publish/confirmation)
+	go func() {
+		for {
+			select {
+			case accountBlocks := <-accountBlockCh:
+				for _, block := range accountBlocks {
+					// Log when our account blocks are published or confirmed
+					logMsg := fmt.Sprintf("%s | Account Block Event | Hash: %s | Height: %d | Type: %d",
 						time.Now().Format("2006-01-02 15:04:05"),
 						block.Hash.String(),
-						err)
-					fmt.Println(errMsg)
-					logger.Println(errMsg)
-					continue
+						block.Height,
+						block.BlockType)
+					fmt.Println(logMsg)
+					logger.Println(logMsg)
 				}
-
-				totalReceived++
-
-				// Track this received TX hash
-				txHash := receiveTx.Hash.String()
-				tracker.addReceivedTx(txHash)
-
-				// Log successful receive
-				logMsg := fmt.Sprintf("%s | RX #%d | Send Hash: %s | Received Hash: %s",
-					time.Now().Format("2006-01-02 15:04:05"),
-					totalReceived,
-					block.Hash.String(),
-					txHash)
-				fmt.Println(logMsg)
-				logger.Println(logMsg)
+			case <-momentumDone:
+				return
 			}
-
-			// Update last activity time since we received new transactions
-			lastActivityTime = time.Now()
 		}
+	}()
+
+	// Start monitoring loop for completion and timeout
+	for {
 
 		// Check if all transactions are confirmed in momentums
 		if tracker.allConfirmed() {
@@ -400,7 +503,7 @@ func runReceiveBot(config *Config, logger *log.Logger) error {
 		}
 
 		// Check if confirmation timeout has been exceeded since last activity
-		elapsed := time.Since(lastActivityTime).Seconds()
+		elapsed := getTimeSinceActivity().Seconds()
 		if elapsed >= float64(config.MomentumConfirmationTimeoutSeconds) {
 			close(momentumDone)
 
@@ -428,8 +531,8 @@ func runReceiveBot(config *Config, logger *log.Logger) error {
 			return nil
 		}
 
-		// Wait for poll interval before checking again
-		time.Sleep(time.Duration(config.PollIntervalSeconds) * time.Second)
+		// Short sleep to avoid busy-waiting
+		time.Sleep(1 * time.Second)
 	}
 }
 

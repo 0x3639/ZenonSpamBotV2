@@ -236,6 +236,16 @@ func initLogger() (*os.File, *log.Logger, error) {
 	return logFile, logger, nil
 }
 
+func initAccountBlockLogger() (*os.File, *log.Logger, error) {
+	logFile, err := os.OpenFile("account-blocks.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open account block log file: %w", err)
+	}
+
+	logger := log.New(logFile, "", 0)
+	return logFile, logger, nil
+}
+
 func autoReceive(z *zenon.Zenon, logger *log.Logger) error {
 	fmt.Println("Checking for unreceived transactions...")
 
@@ -450,6 +460,13 @@ func checkBalance(z *zenon.Zenon, config *Config, logger *log.Logger) error {
 }
 
 func runSendBot(config *Config, logger *log.Logger) error {
+	// Initialize account block logger
+	accountBlockLogFile, accountBlockLogger, err := initAccountBlockLogger()
+	if err != nil {
+		return fmt.Errorf("failed to initialize account block logger: %w", err)
+	}
+	defer accountBlockLogFile.Close()
+
 	// Initialize Zenon client
 	z, err := zenon.NewZenon(config.WalletName)
 	if err != nil {
@@ -480,6 +497,51 @@ func runSendBot(config *Config, logger *log.Logger) error {
 		return err
 	}
 	fmt.Println()
+
+	// Subscribe to account blocks for this address
+	accountBlockSubscription, accountBlockCh, err := z.Client.SubscriberApi.ToAccountBlocksByAddress(z.Address())
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to account blocks: %w", err)
+	}
+	defer accountBlockSubscription.Unsubscribe()
+
+	// Write header to account block log
+	accountBlockLogger.Println("=== Account Block Subscription Log ===")
+	accountBlockLogger.Printf("Monitoring address: %s\n", z.Address().String())
+	accountBlockLogger.Println()
+
+	// Start account block processing goroutine
+	done := make(chan bool)
+	go func() {
+		for {
+			select {
+			case accountBlocks := <-accountBlockCh:
+				for _, block := range accountBlocks {
+					// Log account block details to separate log
+					logMsg := fmt.Sprintf("%s | Hash: %s | Height: %d | BlockType: %d | Address: %s | ToAddress: %s",
+						time.Now().Format("2006-01-02 15:04:05"),
+						block.Hash.String(),
+						block.Height,
+						block.BlockType,
+						block.Address.String(),
+						block.ToAddress.String())
+
+					// Log to account block file
+					accountBlockLogger.Println(logMsg)
+
+					// Also log brief version to console
+					consolMsg := fmt.Sprintf("%s | Account Block | Hash: %s | Height: %d | Type: %d",
+						time.Now().Format("2006-01-02 15:04:05"),
+						block.Hash.String(),
+						block.Height,
+						block.BlockType)
+					fmt.Println(consolMsg)
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
 
 	// Note: Balance check removed due to SDK bug in GetAccountInfoByAddress
 	// The SDK calls wrong RPC method. Monitor first few TXs for balance errors.
@@ -541,6 +603,9 @@ func runSendBot(config *Config, logger *log.Logger) error {
 			time.Sleep(waitTime)
 		}
 	}
+
+	// Close the done channel to stop the account block goroutine
+	close(done)
 
 	fmt.Printf("\nTotal transactions sent: %d\n", totalTxsSent)
 	logger.Printf("Total transactions sent: %d\n", totalTxsSent)

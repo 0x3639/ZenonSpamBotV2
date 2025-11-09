@@ -4,6 +4,7 @@ receive-bot/receive-bot
 
 # Log files
 *.log
+account-blocks.log
 
 # Environment files
 .env

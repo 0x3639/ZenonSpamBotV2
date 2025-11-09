@@ -221,6 +221,16 @@ func initMomentumLogger() (*os.File, *log.Logger, error) {
 	return logFile, logger, nil
 }
 
+func initAccountBlockLogger() (*os.File, *log.Logger, error) {
+	logFile, err := os.OpenFile("account-blocks.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open account block log file: %w", err)
+	}
+
+	logger := log.New(logFile, "", 0)
+	return logFile, logger, nil
+}
+
 // autoReceivePending receives all pending unreceived transactions on startup
 func autoReceivePending(z *zenon.Zenon, logger *log.Logger) (int, error) {
 	totalReceived := 0
@@ -303,6 +313,13 @@ func runReceiveBot(config *Config, logger *log.Logger) error {
 	}
 	defer momentumLogFile.Close()
 
+	// Initialize account block logger
+	accountBlockLogFile, accountBlockLogger, err := initAccountBlockLogger()
+	if err != nil {
+		return fmt.Errorf("failed to initialize account block logger: %w", err)
+	}
+	defer accountBlockLogFile.Close()
+
 	// Initialize Zenon client
 	z, err := zenon.NewZenon(config.WalletName)
 	if err != nil {
@@ -351,9 +368,13 @@ func runReceiveBot(config *Config, logger *log.Logger) error {
 	}
 	defer accountBlockSubscription.Unsubscribe()
 
-	// Write header to momentum log
+	// Write headers to log files
 	momentumLogger.Println("=== Momentum Tracking Log ===")
 	momentumLogger.Println()
+
+	accountBlockLogger.Println("=== Account Block Subscription Log ===")
+	accountBlockLogger.Printf("Monitoring address: %s\n", z.Address().String())
+	accountBlockLogger.Println()
 
 	// Start momentum processing goroutine
 	momentumDone := make(chan bool)
@@ -461,14 +482,25 @@ func runReceiveBot(config *Config, logger *log.Logger) error {
 			select {
 			case accountBlocks := <-accountBlockCh:
 				for _, block := range accountBlocks {
-					// Log when our account blocks are published or confirmed
-					logMsg := fmt.Sprintf("%s | Account Block Event | Hash: %s | Height: %d | Type: %d",
+					// Log account block details to separate log
+					logMsg := fmt.Sprintf("%s | Hash: %s | Height: %d | BlockType: %d | Address: %s | ToAddress: %s",
+						time.Now().Format("2006-01-02 15:04:05"),
+						block.Hash.String(),
+						block.Height,
+						block.BlockType,
+						block.Address.String(),
+						block.ToAddress.String())
+
+					// Log to account block file
+					accountBlockLogger.Println(logMsg)
+
+					// Also log brief version to console
+					consolMsg := fmt.Sprintf("%s | Account Block | Hash: %s | Height: %d | Type: %d",
 						time.Now().Format("2006-01-02 15:04:05"),
 						block.Hash.String(),
 						block.Height,
 						block.BlockType)
-					fmt.Println(logMsg)
-					logger.Println(logMsg)
+					fmt.Println(consolMsg)
 				}
 			case <-momentumDone:
 				return
@@ -476,42 +508,22 @@ func runReceiveBot(config *Config, logger *log.Logger) error {
 		}
 	}()
 
-	// Start monitoring loop for completion and timeout
+	// Start monitoring loop for timeout
 	for {
-
-		// Check if all transactions are confirmed in momentums
-		if tracker.allConfirmed() {
-			close(momentumDone)
-
-			// Generate final summary
-			total, confirmed, producerStats := tracker.getStats()
-			fmt.Printf("\n=== All %d transactions confirmed in momentums ===\n", confirmed)
-			fmt.Println("\nProducer Statistics:")
-			momentumLogger.Println("\n=== Final Summary ===")
-			momentumLogger.Printf("Total transactions received: %d\n", total)
-			momentumLogger.Printf("Total transactions confirmed: %d\n", confirmed)
-			momentumLogger.Println("\nProducer Statistics:")
-
-			for producer, count := range producerStats {
-				summary := fmt.Sprintf("  %s: %d momentums", producer, count)
-				fmt.Println(summary)
-				momentumLogger.Println(summary)
-			}
-
-			logger.Printf("All %d transactions confirmed. Bot shutting down.", confirmed)
-			return nil
-		}
-
 		// Check if confirmation timeout has been exceeded since last activity
 		elapsed := getTimeSinceActivity().Seconds()
 		if elapsed >= float64(config.MomentumConfirmationTimeoutSeconds) {
 			close(momentumDone)
 
 			total, confirmed, producerStats := tracker.getStats()
-			fmt.Printf("\nConfirmation timeout reached after %.0f seconds\n", elapsed)
+			fmt.Printf("\nNo activity for %.0f seconds - shutting down\n", elapsed)
 			fmt.Printf("Total transactions received: %d\n", total)
 			fmt.Printf("Transactions confirmed in momentums: %d\n", confirmed)
-			fmt.Printf("Transactions still unconfirmed: %d\n", total-confirmed)
+			if total > 0 && confirmed == total {
+				fmt.Println("All transactions confirmed!")
+			} else if total > confirmed {
+				fmt.Printf("Transactions still unconfirmed: %d\n", total-confirmed)
+			}
 
 			if len(producerStats) > 0 {
 				fmt.Println("\nProducer Statistics:")

@@ -1,0 +1,15 @@
+[Unit]
+Description=Zenon Receive Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/ZenonSpamBotV2/receive-bot
+ExecStart=/root/ZenonSpamBotV2/receive-bot/receive-bot
+Restart=no
+StandardOutput=append:/root/ZenonSpamBotV2/receive-bot/receive-bot.stdout.log
+StandardError=append:/root/ZenonSpamBotV2/receive-bot/receive-bot.stdout.log
+
+[Install]
+WantedBy=multi-user.target

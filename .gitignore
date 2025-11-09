@@ -6,6 +6,9 @@ receive-bot/receive-bot
 *.log
 account-blocks.log
 
+# PID files
+*.pid
+
 # Environment files
 .env
 

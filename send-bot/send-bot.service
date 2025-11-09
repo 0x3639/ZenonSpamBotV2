@@ -1,0 +1,15 @@
+[Unit]
+Description=Zenon Send Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/ZenonSpamBotV2/send-bot
+ExecStart=/root/ZenonSpamBotV2/send-bot/send-bot
+Restart=no
+StandardOutput=append:/root/ZenonSpamBotV2/send-bot/send-bot.stdout.log
+StandardError=append:/root/ZenonSpamBotV2/send-bot/send-bot.stdout.log
+
+[Install]
+WantedBy=multi-user.target

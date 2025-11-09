@@ -320,8 +320,9 @@ func runReceiveBot(config *Config, logger *log.Logger) error {
 		}
 	}()
 
-	// Track start time for confirmation timeout
-	startTime := time.Now()
+	// Track last activity time for confirmation timeout
+	// This gets updated whenever we receive new transactions
+	lastActivityTime := time.Now()
 
 	// Start polling loop for unreceived transactions
 	for {
@@ -370,6 +371,9 @@ func runReceiveBot(config *Config, logger *log.Logger) error {
 				fmt.Println(logMsg)
 				logger.Println(logMsg)
 			}
+
+			// Update last activity time since we received new transactions
+			lastActivityTime = time.Now()
 		}
 
 		// Check if all transactions are confirmed in momentums
@@ -395,8 +399,8 @@ func runReceiveBot(config *Config, logger *log.Logger) error {
 			return nil
 		}
 
-		// Check if confirmation timeout has been exceeded
-		elapsed := time.Since(startTime).Seconds()
+		// Check if confirmation timeout has been exceeded since last activity
+		elapsed := time.Since(lastActivityTime).Seconds()
 		if elapsed >= float64(config.MomentumConfirmationTimeoutSeconds) {
 			close(momentumDone)
 
